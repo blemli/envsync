@@ -376,9 +376,10 @@ class EnvsyncCommand extends Command
         $originalQuoted = false;
         foreach ($sourceData['structure'] as $sourceLineData) {
             if ($sourceLineData['type'] === 'env_var' && $sourceLineData['key'] === $key) {
-                // Check if the original line had quotes
+                // Check if the original line had quotes by looking at the raw line
                 $originalLine = $sourceLineData['original'];
-                if (preg_match('/=\s*".*"/', $originalLine) || preg_match("/=\s*'.*'/", $originalLine)) {
+                // Look for = followed by optional whitespace and then a quote
+                if (preg_match('/=\s*"/', $originalLine) || preg_match("/=\s*'/", $originalLine)) {
                     $originalQuoted = true;
                 }
                 break;
