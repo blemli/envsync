@@ -69,57 +69,10 @@ class EnvsyncCommand extends Command
 
         $modified = false;
 
-        // Handle differing values interactively
-        $targetModified = $this->handleDifferingValues($sourceEntries, $targetEntries, $sourceFile, $targetFile, $isVersionControlled);
+        // Handle all differences interactively (differing values, missing entries, extra entries)
+        $targetModified = $this->handleAllDifferences($sourceEntries, $targetEntries, $missingInTarget, $missingInSource, $sourceFile, $targetFile, $isVersionControlled);
         if ($targetModified) {
             $modified = true;
-        }
-
-        // Handle entries missing in target
-        if (!empty($missingInTarget)) {
-            $this->info("\nEntries found in '{$sourceFile}' but missing in '{$targetFile}':");
-            foreach ($missingInTarget as $key => $value) {
-                $this->line("  {$key}={$value}");
-            }
-
-            $shouldAdd = $this->option('force') || $this->confirm("Add these entries to '{$targetFile}'?");
-            if ($shouldAdd) {
-                foreach ($missingInTarget as $key => $value) {
-                    if ($isVersionControlled) {
-                        $targetEntries[$key] = '';
-                    } else {
-                        $targetEntries[$key] = $value;
-                    }
-                }
-                $modified = true;
-                if ($this->option('force')) {
-                    $this->info("Automatically adding entries (--force enabled)");
-                }
-            }
-        }
-
-        // Handle entries missing in source
-        if (!empty($missingInSource)) {
-            $this->info("\nEntries found in '{$targetFile}' but missing in '{$sourceFile}':");
-            foreach ($missingInSource as $key => $value) {
-                $this->line("  {$key}={$value}");
-            }
-
-            $shouldRemove = $this->option('force') || $this->confirm("Remove these entries from '{$targetFile}'?");
-            if ($shouldRemove) {
-                foreach ($missingInSource as $key => $value) {
-                    unset($targetEntries[$key]);
-                }
-                $modified = true;
-                if ($this->option('force')) {
-                    $this->info("Automatically removing entries (--force enabled)");
-                }
-            }
-        }
-
-        // Write back to target file if modified (only for missing/extra entries, not differing values)
-        if ($modified && (!empty($missingInTarget) || !empty($missingInSource))) {
-            $this->writeEnvFile($targetFile, $targetEntries);
         }
 
         // Final status message
@@ -277,6 +230,99 @@ class EnvsyncCommand extends Command
         }
 
         File::put($filePath, $content);
+    }
+
+    /**
+     * Handle all differences between source and target files interactively
+     */
+    private function handleAllDifferences(array $sourceEntries, array $targetEntries, array $missingInTarget, array $missingInSource, string $sourceFile, string $targetFile, bool $isTargetVersionControlled): bool
+    {
+        $modified = false;
+        
+        // First handle differing values
+        $differingModified = $this->handleDifferingValues($sourceEntries, $targetEntries, $sourceFile, $targetFile, $isTargetVersionControlled);
+        if ($differingModified) {
+            $modified = true;
+        }
+        
+        // Then handle missing entries in target
+        if (!empty($missingInTarget)) {
+            $this->info("\nEntries found in '{$sourceFile}' but missing in '{$targetFile}':");
+            foreach ($missingInTarget as $key => $value) {
+                $this->line("  {$key}={$value}");
+            }
+            
+            if ($this->option('force')) {
+                $this->info("Automatically adding entries (--force enabled)");
+                $this->addMissingEntriesToTarget($targetFile, $missingInTarget, $isTargetVersionControlled);
+                $modified = true;
+            } else {
+                // Step-by-step decision for each missing entry
+                foreach ($missingInTarget as $key => $value) {
+                    $this->line("");
+                    $this->line("Key '<comment>{$key}</comment>' is missing in {$targetFile}:");
+                    $this->line("  {$sourceFile}: '<info>{$value}</info>'");
+                    
+                    $choice = $this->choice(
+                        'What would you like to do with this missing key?',
+                        [
+                            'a' => 'Add to ' . $targetFile,
+                            'i' => 'Ignore once (skip this time only)',
+                            'f' => 'Forever ignore (add commented out with #ENVIGNORE)',
+                            'q' => 'Quit without making changes'
+                        ],
+                        'a'
+                    );
+                    
+                    switch ($choice) {
+                        case 'a':
+                            // Add the entry to target
+                            $this->addSingleEntryToTarget($targetFile, $key, $value, $isTargetVersionControlled);
+                            $modified = true;
+                            $this->info("✓ Added '{$key}' to {$targetFile}");
+                            break;
+                            
+                        case 'i':
+                            // Ignore once - do nothing
+                            $this->line("⏭ Skipped '{$key}' for this run");
+                            break;
+                            
+                        case 'f':
+                            // Add as commented out with #ENVIGNORE
+                            $this->addIgnoredEntryToTarget($targetFile, $key);
+                            $modified = true;
+                            $this->info("🔇 Added '{$key}' as ignored entry to {$targetFile}");
+                            break;
+                            
+                        case 'q':
+                            $this->info("Exiting without making changes");
+                            return $modified;
+                    }
+                }
+            }
+        }
+        
+        // Finally handle extra entries in target
+        if (!empty($missingInSource)) {
+            $this->info("\nEntries found in '{$targetFile}' but missing in '{$sourceFile}':");
+            foreach ($missingInSource as $key => $value) {
+                $this->line("  {$key}={$value}");
+            }
+            
+            if ($this->option('force')) {
+                $this->info("Automatically removing entries (--force enabled)");
+                $this->removeEntriesFromTarget($targetFile, array_keys($missingInSource));
+                $modified = true;
+            } else {
+                $shouldRemove = $this->confirm("Remove these entries from '{$targetFile}'?");
+                if ($shouldRemove) {
+                    $this->removeEntriesFromTarget($targetFile, array_keys($missingInSource));
+                    $modified = true;
+                }
+            }
+        }
+        
+        return $modified;
     }
 
     /**
@@ -449,6 +495,110 @@ class EnvsyncCommand extends Command
         $content = rtrim($content, "\n") . "\n";
         
         File::put($filePath, $content);
+    }
+
+    /**
+     * Add multiple missing entries to target file
+     */
+    private function addMissingEntriesToTarget(string $targetFile, array $missingEntries, bool $isVersionControlled): void
+    {
+        $targetData = $this->parseEnvFileWithStructure($targetFile);
+        $structure = $targetData['structure'];
+        
+        // Add new entries at the end
+        $maxLineNumber = max(array_keys($structure));
+        $lineNumber = $maxLineNumber + 1;
+        
+        foreach ($missingEntries as $key => $value) {
+            $formattedValue = $isVersionControlled ? '' : $value;
+            
+            // Quote values that contain spaces or special characters
+            if (!empty($formattedValue) && (str_contains($formattedValue, ' ') || str_contains($formattedValue, '#') || str_contains($formattedValue, '"') || str_contains($formattedValue, '$'))) {
+                $formattedValue = '"' . str_replace('"', '\"', $formattedValue) . '"';
+            }
+            
+            $structure[$lineNumber] = [
+                'original' => "{$key}={$formattedValue}",
+                'type' => 'env_var',
+                'key' => $key,
+                'value' => $isVersionControlled ? '' : $value,
+                'ignored' => false
+            ];
+            $lineNumber++;
+        }
+        
+        $this->writeEnvFileWithStructure($targetFile, $structure);
+    }
+    
+    /**
+     * Add a single entry to target file
+     */
+    private function addSingleEntryToTarget(string $targetFile, string $key, string $value, bool $isVersionControlled): void
+    {
+        $targetData = $this->parseEnvFileWithStructure($targetFile);
+        $structure = $targetData['structure'];
+        
+        // Add new entry at the end
+        $maxLineNumber = max(array_keys($structure));
+        $lineNumber = $maxLineNumber + 1;
+        
+        $formattedValue = $isVersionControlled ? '' : $value;
+        
+        // Quote values that contain spaces or special characters
+        if (!empty($formattedValue) && (str_contains($formattedValue, ' ') || str_contains($formattedValue, '#') || str_contains($formattedValue, '"') || str_contains($formattedValue, '$'))) {
+            $formattedValue = '"' . str_replace('"', '\"', $formattedValue) . '"';
+        }
+        
+        $structure[$lineNumber] = [
+            'original' => "{$key}={$formattedValue}",
+            'type' => 'env_var',
+            'key' => $key,
+            'value' => $isVersionControlled ? '' : $value,
+            'ignored' => false
+        ];
+        
+        $this->writeEnvFileWithStructure($targetFile, $structure);
+    }
+    
+    /**
+     * Add an ignored entry (commented out with #ENVIGNORE) to target file
+     */
+    private function addIgnoredEntryToTarget(string $targetFile, string $key): void
+    {
+        $targetData = $this->parseEnvFileWithStructure($targetFile);
+        $structure = $targetData['structure'];
+        
+        // Add new ignored entry at the end
+        $maxLineNumber = max(array_keys($structure));
+        $lineNumber = $maxLineNumber + 1;
+        
+        $structure[$lineNumber] = [
+            'original' => "# {$key}= #ENVIGNORE",
+            'type' => 'comment',
+            'key' => $key,
+            'value' => '',
+            'ignored' => true
+        ];
+        
+        $this->writeEnvFileWithStructure($targetFile, $structure);
+    }
+    
+    /**
+     * Remove entries from target file
+     */
+    private function removeEntriesFromTarget(string $targetFile, array $keysToRemove): void
+    {
+        $targetData = $this->parseEnvFileWithStructure($targetFile);
+        $structure = $targetData['structure'];
+        
+        // Remove lines that contain the keys to remove
+        foreach ($structure as $lineNumber => $lineData) {
+            if ($lineData['type'] === 'env_var' && in_array($lineData['key'], $keysToRemove)) {
+                unset($structure[$lineNumber]);
+            }
+        }
+        
+        $this->writeEnvFileWithStructure($targetFile, $structure);
     }
 
     /**
