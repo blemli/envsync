@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\File;
 
 class EnvsyncCommand extends Command
 {
-    public $signature = 'env:sync {--path=.env.example : Path to the target file to sync with} {--force : Skip confirmation prompts and apply all changes automatically} {--auto-sync : Automatically sync all differing values from source to target}';
+    public $signature = 'env:sync {--path=.env.example : Path to the target file to sync with} {--force : Skip confirmation prompts and apply all changes automatically} {--auto-sync : Automatically sync all differing values from source to target} {--remove : Remove keys from source file that are not present in target file}';
 
     public $description = 'Sync .env files by comparing keys and prompting for missing entries';
 
@@ -75,9 +75,17 @@ class EnvsyncCommand extends Command
             $modified = true;
         }
 
+        // Handle --remove option: remove keys from source that are not in target
+        if ($this->option('remove')) {
+            $sourceModified = $this->handleRemoveFromSource($sourceEntries, $targetEntries, $sourceFile, $targetFile);
+            if ($sourceModified) {
+                $modified = true;
+            }
+        }
+
         // Final status message
         if ($modified) {
-            $this->info("\nSuccessfully synced '{$targetFile}' with '{$sourceFile}'");
+            $this->info("\nSuccessfully synced files");
         } else {
             // Check if there were any differences at all
             $sourceEntries = $this->parseEnvFile($sourceFile);
@@ -96,7 +104,7 @@ class EnvsyncCommand extends Command
             if (empty($missingInTarget) && empty($missingInSource) && !$hasDifferingValues) {
                 $this->info("\nFiles are already in sync. No changes needed.");
             } else {
-                $this->info("\nNo changes made to '{$targetFile}'");
+                $this->info("\nNo changes made");
             }
         }
 
@@ -599,6 +607,82 @@ class EnvsyncCommand extends Command
         }
         
         $this->writeEnvFileWithStructure($targetFile, $structure);
+    }
+
+    /**
+     * Handle removing keys from source file that are not present in target file
+     */
+    private function handleRemoveFromSource(array $sourceEntries, array $targetEntries, string $sourceFile, string $targetFile): bool
+    {
+        // Find keys that exist in source but not in target
+        $keysToRemove = array_diff_key($sourceEntries, $targetEntries);
+        
+        if (empty($keysToRemove)) {
+            return false;
+        }
+        
+        // Check if source file is version controlled
+        $isSourceVersionControlled = $this->isVersionControlled($sourceFile);
+        
+        $this->warn("\n⚠️  REMOVE MODE: Keys found in '{$sourceFile}' but missing in '{$targetFile}':");
+        foreach ($keysToRemove as $key => $value) {
+            $this->line("  <comment>{$key}</comment>={$value}");
+        }
+        
+        // Show safety warning
+        if (!$isSourceVersionControlled) {
+            $this->error("\n🚨 WARNING: '{$sourceFile}' is NOT version controlled!");
+            $this->error("   Removing keys from unversioned files can result in permanent data loss.");
+            $this->error("   Consider committing your changes to git before proceeding.");
+        } else {
+            $this->info("\n✓ '{$sourceFile}' is version controlled - changes can be reverted if needed.");
+        }
+        
+        // Force mode handling
+        if ($this->option('force')) {
+            if (!$isSourceVersionControlled) {
+                $this->error("❌ Cannot use --force with --remove on unversioned files for safety reasons.");
+                $this->error("   Please version control '{$sourceFile}' first or run without --force for confirmation prompts.");
+                return false;
+            }
+            
+            $this->info("🔄 Automatically removing keys (--force enabled)");
+            $this->removeEntriesFromTarget($sourceFile, array_keys($keysToRemove));
+            $this->info("✓ Removed " . count($keysToRemove) . " keys from '{$sourceFile}'");
+            return true;
+        }
+        
+        // Interactive confirmation
+        $this->line("");
+        $confirmed = $this->confirm(
+            "Are you sure you want to remove these " . count($keysToRemove) . " keys from '{$sourceFile}'?",
+            false
+        );
+        
+        if (!$confirmed) {
+            $this->info("❌ Remove operation cancelled");
+            return false;
+        }
+        
+        // Additional confirmation for unversioned files
+        if (!$isSourceVersionControlled) {
+            $this->line("");
+            $doubleConfirmed = $this->confirm(
+                "⚠️  FINAL WARNING: '{$sourceFile}' is not version controlled. This action cannot be undone. Continue?",
+                false
+            );
+            
+            if (!$doubleConfirmed) {
+                $this->info("❌ Remove operation cancelled");
+                return false;
+            }
+        }
+        
+        // Perform the removal
+        $this->removeEntriesFromTarget($sourceFile, array_keys($keysToRemove));
+        $this->info("✓ Removed " . count($keysToRemove) . " keys from '{$sourceFile}'");
+        
+        return true;
     }
 
     /**
