@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\File;
 
 class EnvsyncCommand extends Command
 {
-    public $signature = 'env:sync {--path=.env.example : Path to the target file to sync with} {--force : Skip confirmation prompts and apply all changes automatically}';
+    public $signature = 'env:sync {--path=.env.example : Path to the target file to sync with} {--force : Skip confirmation prompts and apply all changes automatically} {--auto-sync : Automatically sync all differing values from source to target}';
 
     public $description = 'Sync .env files by comparing keys and prompting for missing entries';
 
@@ -47,10 +47,13 @@ class EnvsyncCommand extends Command
         $missingInTarget = array_diff_key($sourceEntries, $targetEntries);
         $missingInSource = array_diff_key($targetEntries, $sourceEntries);
 
-        // Check for differing values and empty values
-        $this->checkForWarnings($sourceEntries, $targetEntries, $sourceFile, $targetFile, $isVersionControlled);
-
         $modified = false;
+
+        // Handle differing values interactively
+        $targetModified = $this->handleDifferingValues($sourceEntries, $targetEntries, $sourceFile, $targetFile, $isVersionControlled);
+        if ($targetModified) {
+            $modified = true;
+        }
 
         // Handle entries missing in target
         if (!empty($missingInTarget)) {
@@ -94,25 +97,41 @@ class EnvsyncCommand extends Command
             }
         }
 
-        // If no differences found
-        if (empty($missingInTarget) && empty($missingInSource)) {
-            $this->info("\nFiles are already in sync. No changes needed.");
-            return self::SUCCESS;
+        // Write back to target file if modified (only for missing/extra entries, not differing values)
+        if ($modified && (!empty($missingInTarget) || !empty($missingInSource))) {
+            $this->writeEnvFile($targetFile, $targetEntries);
         }
 
-        // Write back to target file if modified
+        // Final status message
         if ($modified) {
-            $this->writeEnvFile($targetFile, $targetEntries);
             $this->info("\nSuccessfully synced '{$targetFile}' with '{$sourceFile}'");
         } else {
-            $this->info("\nNo changes made to '{$targetFile}'");
+            // Check if there were any differences at all
+            $sourceEntries = $this->parseEnvFile($sourceFile);
+            $targetEntries = $this->parseEnvFile($targetFile);
+            $commonKeys = array_intersect_key($sourceEntries, $targetEntries);
+            $hasDifferingValues = false;
+            
+            foreach ($commonKeys as $key => $sourceValue) {
+                $targetValue = $targetEntries[$key];
+                if (!empty($sourceValue) && !empty($targetValue) && $sourceValue !== $targetValue) {
+                    $hasDifferingValues = true;
+                    break;
+                }
+            }
+            
+            if (empty($missingInTarget) && empty($missingInSource) && !$hasDifferingValues) {
+                $this->info("\nFiles are already in sync. No changes needed.");
+            } else {
+                $this->info("\nNo changes made to '{$targetFile}'");
+            }
         }
 
         return self::SUCCESS;
     }
 
     /**
-     * Parse an .env file and return key-value pairs
+     * Parse an .env file and return key-value pairs, preserving structure
      */
     private function parseEnvFile(string $filePath): array
     {
@@ -121,10 +140,16 @@ class EnvsyncCommand extends Command
         $lines = explode("\n", $content);
 
         foreach ($lines as $line) {
+            $originalLine = $line;
             $line = trim($line);
             
             // Skip empty lines and comments
             if (empty($line) || str_starts_with($line, '#')) {
+                continue;
+            }
+
+            // Skip lines with #ENVIGNORE comment
+            if (str_contains($originalLine, '#ENVIGNORE')) {
                 continue;
             }
 
@@ -133,6 +158,11 @@ class EnvsyncCommand extends Command
                 $parts = explode('=', $line, 2);
                 $key = trim($parts[0]);
                 $value = isset($parts[1]) ? trim($parts[1]) : '';
+                
+                // Remove #ENVIGNORE comment if present in value
+                if (str_contains($value, '#ENVIGNORE')) {
+                    $value = trim(str_replace('#ENVIGNORE', '', $value));
+                }
                 
                 // Remove quotes if present
                 if ((str_starts_with($value, '"') && str_ends_with($value, '"')) ||
@@ -145,6 +175,69 @@ class EnvsyncCommand extends Command
         }
 
         return $entries;
+    }
+
+    /**
+     * Parse an .env file and return structured data with original lines
+     */
+    private function parseEnvFileWithStructure(string $filePath): array
+    {
+        $content = File::get($filePath);
+        $lines = explode("\n", $content);
+        $entries = [];
+        $structure = [];
+
+        foreach ($lines as $lineNumber => $line) {
+            $originalLine = $line;
+            $trimmedLine = trim($line);
+            
+            $structure[$lineNumber] = [
+                'original' => $originalLine,
+                'type' => 'other'
+            ];
+            
+            // Handle empty lines and comments
+            if (empty($trimmedLine) || str_starts_with($trimmedLine, '#')) {
+                $structure[$lineNumber]['type'] = empty($trimmedLine) ? 'empty' : 'comment';
+                continue;
+            }
+
+            // Parse key=value pairs
+            if (str_contains($trimmedLine, '=')) {
+                $parts = explode('=', $trimmedLine, 2);
+                $key = trim($parts[0]);
+                $value = isset($parts[1]) ? trim($parts[1]) : '';
+                
+                // Check if line has #ENVIGNORE
+                $hasIgnore = str_contains($originalLine, '#ENVIGNORE');
+                
+                // Remove #ENVIGNORE comment from value for processing
+                if (str_contains($value, '#ENVIGNORE')) {
+                    $value = trim(str_replace('#ENVIGNORE', '', $value));
+                }
+                
+                // Remove quotes if present
+                if ((str_starts_with($value, '"') && str_ends_with($value, '"')) ||
+                    (str_starts_with($value, "'") && str_ends_with($value, "'"))) {
+                    $value = substr($value, 1, -1);
+                }
+                
+                $structure[$lineNumber] = [
+                    'original' => $originalLine,
+                    'type' => 'env_var',
+                    'key' => $key,
+                    'value' => $value,
+                    'ignored' => $hasIgnore
+                ];
+                
+                // Only include in entries if not ignored
+                if (!$hasIgnore) {
+                    $entries[$key] = $value;
+                }
+            }
+        }
+
+        return ['entries' => $entries, 'structure' => $structure];
     }
 
     /**
@@ -167,49 +260,160 @@ class EnvsyncCommand extends Command
     }
 
     /**
-     * Check for warnings about differing values and empty values
+     * Handle differing values between source and target files interactively
      */
-    private function checkForWarnings(array $sourceEntries, array $targetEntries, string $sourceFile, string $targetFile, bool $isTargetVersionControlled): void
+    private function handleDifferingValues(array $sourceEntries, array $targetEntries, string $sourceFile, string $targetFile, bool $isTargetVersionControlled): bool
     {
-        $warnings = [];
+        $modified = false;
+        $differingKeys = [];
         
-        // Check for differing non-empty values
+        // Find keys with different values
         $commonKeys = array_intersect_key($sourceEntries, $targetEntries);
         foreach ($commonKeys as $key => $sourceValue) {
             $targetValue = $targetEntries[$key];
             
-            // Only warn if both values are non-empty and different
+            // Only consider if both values are non-empty and different
             if (!empty($sourceValue) && !empty($targetValue) && $sourceValue !== $targetValue) {
-                $warnings[] = "Key '{$key}' has different values: '{$sourceFile}' = '{$sourceValue}', '{$targetFile}' = '{$targetValue}'";
+                $differingKeys[$key] = [
+                    'source' => $sourceValue,
+                    'target' => $targetValue
+                ];
             }
         }
         
-        // Check for empty values in version-controlled files
-        if ($isTargetVersionControlled) {
-            foreach ($targetEntries as $key => $value) {
-                if (empty($value)) {
-                    $warnings[] = "Key '{$key}' has empty value in version-controlled file '{$targetFile}'";
+        if (empty($differingKeys)) {
+            return false;
+        }
+        
+        $this->warn("\nDiffering values detected:");
+        
+        foreach ($differingKeys as $key => $values) {
+            $this->line("");
+            $this->line("Key '<comment>{$key}</comment>' has different values:");
+            $this->line("  {$sourceFile}: '<info>{$values['source']}</info>'");
+            $this->line("  {$targetFile}: '<comment>{$values['target']}</comment>'");
+            
+            if ($this->option('force') || $this->option('auto-sync')) {
+                // In force or auto-sync mode, automatically sync from source to target
+                $choice = 's';
+                if ($this->option('force')) {
+                    $this->info("Automatically syncing (--force enabled)");
+                } else {
+                    $this->info("Automatically syncing (--auto-sync enabled)");
                 }
+            } else {
+                $choice = $this->choice(
+                    'What would you like to do with this key?',
+                    [
+                        's' => 'Sync from ' . $sourceFile . ' to ' . $targetFile,
+                        'i' => 'Ignore once (skip this time only)',
+                        'f' => 'Forever ignore (add #ENVIGNORE to this line)',
+                        'q' => 'Quit without making changes'
+                    ],
+                    's'
+                );
+            }
+            
+            switch ($choice) {
+                case 's':
+                    // Sync value from source to target
+                    $this->syncValueToTarget($targetFile, $key, $values['source'], $isTargetVersionControlled);
+                    $modified = true;
+                    $this->info("✓ Synced '{$key}' from {$sourceFile} to {$targetFile}");
+                    break;
+                    
+                case 'i':
+                    // Ignore once - do nothing
+                    $this->line("⏭ Skipped '{$key}' for this run");
+                    break;
+                    
+                case 'f':
+                    // Add #ENVIGNORE to the target file line
+                    $this->addIgnoreComment($targetFile, $key);
+                    $modified = true;
+                    $this->info("🔇 Added #ENVIGNORE to '{$key}' in {$targetFile}");
+                    break;
+                    
+                case 'q':
+                    $this->info("Exiting without making changes");
+                    return $modified;
             }
         }
         
-        // Check if source file is also version controlled and has empty values
-        $isSourceVersionControlled = $this->isVersionControlled('.env');
-        if ($isSourceVersionControlled) {
-            foreach ($sourceEntries as $key => $value) {
-                if (empty($value)) {
-                    $warnings[] = "Key '{$key}' has empty value in version-controlled file '{$sourceFile}'";
+        return $modified;
+    }
+    
+    /**
+     * Sync a specific value from source to target file
+     */
+    private function syncValueToTarget(string $targetFile, string $key, string $newValue, bool $isVersionControlled): void
+    {
+        $targetData = $this->parseEnvFileWithStructure($targetFile);
+        $structure = $targetData['structure'];
+        
+        // Find the line with this key and update it
+        foreach ($structure as $lineNumber => $lineData) {
+            if ($lineData['type'] === 'env_var' && $lineData['key'] === $key) {
+                // Format the new value
+                $formattedValue = $newValue;
+                if ($isVersionControlled) {
+                    $formattedValue = ''; // Clear value for version controlled files
                 }
+                
+                // Quote if necessary
+                if (str_contains($formattedValue, ' ') || str_contains($formattedValue, '#') || str_contains($formattedValue, '"')) {
+                    $formattedValue = '"' . str_replace('"', '\"', $formattedValue) . '"';
+                }
+                
+                $structure[$lineNumber]['original'] = "{$key}={$formattedValue}";
+                $structure[$lineNumber]['value'] = $isVersionControlled ? '' : $newValue;
+                break;
             }
         }
         
-        // Display warnings if any
-        if (!empty($warnings)) {
-            $this->warn("\nWarnings detected:");
-            foreach ($warnings as $warning) {
-                $this->line("  ⚠️  {$warning}");
+        $this->writeEnvFileWithStructure($targetFile, $structure);
+    }
+    
+    /**
+     * Add #ENVIGNORE comment to a specific key in the target file
+     */
+    private function addIgnoreComment(string $targetFile, string $key): void
+    {
+        $targetData = $this->parseEnvFileWithStructure($targetFile);
+        $structure = $targetData['structure'];
+        
+        // Find the line with this key and add #ENVIGNORE
+        foreach ($structure as $lineNumber => $lineData) {
+            if ($lineData['type'] === 'env_var' && $lineData['key'] === $key) {
+                $originalLine = $lineData['original'];
+                
+                // Add #ENVIGNORE if not already present
+                if (!str_contains($originalLine, '#ENVIGNORE')) {
+                    $structure[$lineNumber]['original'] = rtrim($originalLine) . ' #ENVIGNORE';
+                    $structure[$lineNumber]['ignored'] = true;
+                }
+                break;
             }
         }
+        
+        $this->writeEnvFileWithStructure($targetFile, $structure);
+    }
+    
+    /**
+     * Write env file preserving original structure
+     */
+    private function writeEnvFileWithStructure(string $filePath, array $structure): void
+    {
+        $content = '';
+        
+        foreach ($structure as $lineData) {
+            $content .= $lineData['original'] . "\n";
+        }
+        
+        // Remove trailing newline if the original didn't have one
+        $content = rtrim($content, "\n") . "\n";
+        
+        File::put($filePath, $content);
     }
 
     /**
