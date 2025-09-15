@@ -7,7 +7,16 @@
 
 A powerful Laravel package for synchronizing environment files with interactive prompts and intelligent conflict resolution. EnvSync helps you keep your `.env`, `.env.example`, and other environment files in perfect harmony.
 
+
+
+> [!CAUTION] 
+>
+>  🤖🧠 This Package was vibe coded 🤖🧠
+
+
+
 **Key Features:**
+
 - 🔄 **Interactive Sync**: Per-key prompts for differing values with sync, ignore, or permanent ignore options
 - 🚫 **Smart Ignoring**: Use `#ENVIGNORE` comments to permanently ignore specific environment variables
 - 📁 **Structure Preservation**: Maintains file formatting, comments, and organization
@@ -142,7 +151,7 @@ php artisan env:sync --path=.env.example
 
 | Option | Description |
 |--------|-------------|
-| `--path=FILE` | Target file to sync with (default: `.env.example`) |
+| `--path=FILE`🤖🧠 | Target file to sync with (default: `.env.example`) |
 | `--force` | Skip all confirmation prompts and apply changes automatically |
 | `--auto-sync` | Automatically sync all differing values from source to target |
 

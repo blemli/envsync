@@ -371,6 +371,20 @@ class EnvsyncCommand extends Command
         $targetData = $this->parseEnvFileWithStructure($targetFile);
         $structure = $targetData['structure'];
         
+        // Get the original value from source to preserve quoting
+        $sourceData = $this->parseEnvFileWithStructure('.env');
+        $originalQuoted = false;
+        foreach ($sourceData['structure'] as $sourceLineData) {
+            if ($sourceLineData['type'] === 'env_var' && $sourceLineData['key'] === $key) {
+                // Check if the original line had quotes
+                $originalLine = $sourceLineData['original'];
+                if (preg_match('/=\s*".*"/', $originalLine) || preg_match("/=\s*'.*'/", $originalLine)) {
+                    $originalQuoted = true;
+                }
+                break;
+            }
+        }
+        
         // Find the line with this key and update it
         foreach ($structure as $lineNumber => $lineData) {
             if ($lineData['type'] === 'env_var' && $lineData['key'] === $key) {
@@ -380,8 +394,8 @@ class EnvsyncCommand extends Command
                     $formattedValue = ''; // Clear value for version controlled files
                 }
                 
-                // Quote if necessary
-                if (str_contains($formattedValue, ' ') || str_contains($formattedValue, '#') || str_contains($formattedValue, '"')) {
+                // Preserve original quoting or add quotes if necessary
+                if ($originalQuoted || str_contains($formattedValue, ' ') || str_contains($formattedValue, '#') || str_contains($formattedValue, '"') || str_contains($formattedValue, '$')) {
                     $formattedValue = '"' . str_replace('"', '\"', $formattedValue) . '"';
                 }
                 
