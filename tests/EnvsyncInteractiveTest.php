@@ -175,3 +175,26 @@ it('handles version controlled files correctly when syncing', function () {
     expect($result)->toContain('API_KEY=');
     expect($result)->not->toContain('secret_value');
 });
+
+it('does not list ignored entries as missing', function () {
+    // Create source file
+    File::put('.env', "APP_NAME=MyApp\nDB_HOST=localhost\nAPI_KEY=secret\n");
+    
+    // Create target file with ignored entry
+    File::put('.env.interactive.test', "APP_NAME=ExampleApp\nDB_HOST=prod-server #ENVIGNORE\nAPI_KEY=example_key\n");
+
+    $this->artisan('env:sync', ['--path' => '.env.interactive.test', '--auto-sync'])
+        ->expectsOutput('Syncing \'.env\' with \'.env.interactive.test\'')
+        ->expectsOutput('Ignored entries (marked with #ENVIGNORE in target file):')
+        ->expectsOutput('  DB_HOST - permanently ignored')
+        ->expectsOutput('Differing values detected:')
+        ->expectsOutput('✓ Synced \'APP_NAME\' from .env to .env.interactive.test')
+        ->expectsOutput('✓ Synced \'API_KEY\' from .env to .env.interactive.test')
+        ->assertExitCode(0);
+
+    // Verify DB_HOST was not changed (still ignored)
+    $targetContent = File::get('.env.interactive.test');
+    expect($targetContent)->toContain('DB_HOST=prod-server #ENVIGNORE');
+    expect($targetContent)->toContain('APP_NAME=MyApp');
+    expect($targetContent)->toContain('API_KEY=secret');
+});

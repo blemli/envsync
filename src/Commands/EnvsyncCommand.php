@@ -43,9 +43,29 @@ class EnvsyncCommand extends Command
             $this->info("Target file '{$targetFile}' is not version controlled - values will be copied.");
         }
 
-        // Find differences
+        // Parse target file with structure to get ignored entries
+        $targetData = $this->parseEnvFileWithStructure($targetFile);
+        $ignoredKeys = [];
+        foreach ($targetData['structure'] as $lineData) {
+            if ($lineData['type'] === 'env_var' && isset($lineData['ignored']) && $lineData['ignored']) {
+                $ignoredKeys[] = $lineData['key'];
+            }
+        }
+
+        // Find differences, accounting for ignored entries
         $missingInTarget = array_diff_key($sourceEntries, $targetEntries);
         $missingInSource = array_diff_key($targetEntries, $sourceEntries);
+        
+        // Remove ignored keys from missing lists and show info about them
+        $ignoredInTarget = array_intersect($ignoredKeys, array_keys($sourceEntries));
+        if (!empty($ignoredInTarget)) {
+            $this->info("\nIgnored entries (marked with #ENVIGNORE in target file):");
+            foreach ($ignoredInTarget as $key) {
+                $this->line("  <comment>{$key}</comment> - permanently ignored");
+                // Remove from missing list since it's intentionally ignored
+                unset($missingInTarget[$key]);
+            }
+        }
 
         $modified = false;
 
