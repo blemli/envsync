@@ -15,6 +15,7 @@ class EnvsyncCommand extends Command
     {
         $sourceFile = '.env';
         $targetFile = $this->option('path');
+        $wasDecrypted = false;
 
         // Check if source file exists
         if (!File::exists($sourceFile)) {
@@ -24,8 +25,33 @@ class EnvsyncCommand extends Command
 
         // Check if target file exists
         if (!File::exists($targetFile)) {
-            $this->error("Target file '{$targetFile}' does not exist.");
-            return self::FAILURE;
+            $encryptedFile = $targetFile . '.encrypted';
+
+            if (File::exists($encryptedFile)) {
+                if ($this->option('no-interaction')) {
+                    $this->error("Target file '{$targetFile}' does not exist, but '{$encryptedFile}' was found. Run 'php artisan env:decrypt --env=" . $this->getEnvFromPath($targetFile) . "' to decrypt it first.");
+                    return self::FAILURE;
+                }
+
+                if ($this->confirm("Target file '{$targetFile}' does not exist, but '{$encryptedFile}' was found. Would you like to decrypt it?")) {
+                    $exitCode = $this->call('env:decrypt', [
+                        '--env' => $this->getEnvFromPath($targetFile),
+                    ]);
+
+                    if ($exitCode !== 0 || !File::exists($targetFile)) {
+                        $this->error("Failed to decrypt '{$encryptedFile}'.");
+                        return self::FAILURE;
+                    }
+
+                    $this->info("Successfully decrypted '{$encryptedFile}' to '{$targetFile}'.");
+                    $wasDecrypted = true;
+                } else {
+                    return self::FAILURE;
+                }
+            } else {
+                $this->error("Target file '{$targetFile}' does not exist.");
+                return self::FAILURE;
+            }
         }
 
         $this->info("Syncing '{$sourceFile}' with '{$targetFile}'");
@@ -105,6 +131,26 @@ class EnvsyncCommand extends Command
                 $this->info("\nFiles are already in sync. No changes needed.");
             } else {
                 $this->info("\nNo changes made");
+            }
+        }
+
+        // Offer to re-encrypt if we decrypted at the start
+        if ($wasDecrypted && !$this->option('no-interaction')) {
+            if ($this->confirm("Would you like to re-encrypt '{$targetFile}'?", true)) {
+                $exitCode = $this->call('env:encrypt', [
+                    '--env' => $this->getEnvFromPath($targetFile),
+                    '--force' => true,
+                ]);
+
+                if ($exitCode === 0) {
+                    $this->info("Successfully re-encrypted '{$targetFile}'.");
+
+                    // Clean up the decrypted file
+                    File::delete($targetFile);
+                    $this->info("Removed decrypted '{$targetFile}'.");
+                } else {
+                    $this->warn("Failed to re-encrypt '{$targetFile}'. The decrypted file has been left in place.");
+                }
             }
         }
 
@@ -683,6 +729,20 @@ class EnvsyncCommand extends Command
         $this->info("✓ Removed " . count($keysToRemove) . " keys from '{$sourceFile}'");
         
         return true;
+    }
+
+    /**
+     * Extract the environment name from an env file path (e.g., '.env.staging' -> 'staging')
+     */
+    private function getEnvFromPath(string $filePath): string
+    {
+        $filename = basename($filePath);
+
+        if (preg_match('/^\.env\.(.+)$/', $filename, $matches)) {
+            return $matches[1];
+        }
+
+        return '';
     }
 
     /**
